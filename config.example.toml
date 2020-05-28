@@ -1,0 +1,12 @@
+# slack
+# OAuth access token, user token scopes are required.
+slack-token = "slack-token"
+slack-channel = "slack-channel"
+
+# github
+github-token = "github-token"
+# github-data = "~/.issues-watcher"
+repos = ["pingcap/parser"]
+projects = [
+  "https://github.com/pingcap/tidb/projects/40"
+]
