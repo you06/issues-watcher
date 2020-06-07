@@ -53,6 +53,9 @@ mod tests {
         assert_eq!(config.github_token, "github-token");
         assert_eq!(config.github_data, "~/.issues-watcher");
         assert_eq!(config.repos, vec!["pingcap/parser"]);
-        assert_eq!(config.projects, vec!["https://github.com/pingcap/tidb/projects/40"]);
+        assert_eq!(
+            config.projects,
+            vec!["https://github.com/pingcap/tidb/projects/40"]
+        );
     }
 }

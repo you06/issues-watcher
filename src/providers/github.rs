@@ -1,5 +1,5 @@
-use std::{convert::From, fmt};
 use regex::Regex;
+use std::{convert::From, fmt, collections::HashMap};
 
 use chrono::{DateTime, Utc};
 use reqwest;
@@ -28,6 +28,14 @@ impl std::error::Error for Error {
     }
 }
 
+impl From<&str> for Error {
+    fn from(err: &str) -> Self {
+        Error {
+            reason: err.to_string(),
+        }
+    }
+}
+
 impl From<JsonError> for Error {
     fn from(err: JsonError) -> Self {
         Error {
@@ -44,11 +52,13 @@ impl From<reqwest::Error> for Error {
     }
 }
 
+#[derive(Debug)]
 pub struct GitHub {
     token: String,
     client: reqwest::Client,
     repos: Vec<Repo>,
     projects: Vec<Project>,
+    time: DateTime<Utc>,
 }
 
 struct Header {
@@ -72,12 +82,18 @@ impl From<String> for Repo {
     }
 }
 
-
-#[derive(Debug, Eq, PartialEq)]
-struct Project {
+#[derive(Debug, Eq, PartialEq, Clone)]
+pub struct Project {
     owner: String,
     repo: String,
     number: i32,
+    id: Option<i64>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct GitHubProject {
+    id: i64,
+    number: i32
 }
 
 impl From<String> for Project {
@@ -89,12 +105,14 @@ impl From<String> for Project {
                 owner: m.get(1).unwrap().as_str().to_owned(),
                 repo: m.get(2).unwrap().as_str().to_owned(),
                 number: m.get(3).unwrap().as_str().parse::<i32>().unwrap(),
+                id: None,
             }
         } else {
             Project {
                 owner: "".to_owned(),
                 repo: "".to_owned(),
                 number: 0,
+                id: None,
             }
         }
     }
@@ -105,25 +123,25 @@ pub struct User {
     login: String,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct Pull {
     html_url: String,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct Assignee {
     id: i64,
     login: String,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct Label {
     id: i64,
     name: String,
     description: Option<String>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct Issue {
     number: i32,
     title: String,
@@ -154,19 +172,59 @@ pub struct Comment {
     author_association: String,
 }
 
+#[derive(Debug)]
+pub struct RepoIssues<'a> {
+    repo: &'a Repo,
+    issues: Vec<Issue>,
+}
+
+#[derive(Debug)]
+pub struct ProjectIssues<'a> {
+    project: &'a Project,
+    columns: Vec<Column>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct Column {
+    id: i64,
+    name: String,
+    #[serde(skip_deserializing)]
+    cards: Vec<Card>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct Card {
+
+}
+
+#[derive(Debug)]
+pub struct Snapshot<'a> {
+    time: &'a DateTime<Utc>,
+    repo_issues: Vec<RepoIssues<'a>>,
+    project_issues: Vec<ProjectIssues<'a>>,
+}
+
 impl GitHub {
     pub fn new(token: String, repos: Vec<String>, projects: Vec<String>) -> Self {
         let mut auth_header = "token ".to_owned();
         auth_header.push_str(&token);
         let repos: Vec<Repo> = repos.into_iter().map(Into::into).collect();
-        let projects = projects.into_iter()
+        let projects = projects
+            .into_iter()
             .map(Into::into)
-            .filter(|p: &Project| !&repos.contains(&Repo{owner: p.owner.to_owned(), repo: p.repo.to_owned()})).collect();
+            .filter(|p: &Project| {
+                !&repos.contains(&Repo {
+                    owner: p.owner.to_owned(),
+                    repo: p.repo.to_owned(),
+                })
+            })
+            .collect();
         GitHub {
             token: auth_header,
             client: reqwest::Client::new(),
             repos,
             projects,
+            time: Utc::now(),
         }
     }
 
@@ -190,41 +248,23 @@ impl GitHub {
         Ok(u.login.to_owned())
     }
 
-    pub async fn get_opened_issues(&self, raw: Vec<String>) -> Result<Vec<Issue>> {
-        let now = Utc::now();
-        let repos = parse_repos(raw);
-        let mut opened_all = vec![];
-        for repo in repos {
-            println!("process {}/{}", repo.owner, repo.repo);
-            let issues = self.get_opened_issues_by_repo(&repo).await?;
-            opened_all.extend(issues);
-        }
+    // pub async fn get_issues(&self) -> Result<Vec<Issue>> {
+    //     let mut opened_all = vec![];
+    //     for repo in self.repos.iter() {
+    //         println!("process {}/{}", repo.owner, repo.repo);
+    //         let issues = self.get_opened_issues_by_repo(&repo).await?;
+    //         opened_all.extend(issues);
+    //     }
 
-        let opened_issues: Vec<Issue> = opened_all
-            .into_iter()
-            .filter(|issue| {
-                if now.signed_duration_since(issue.created_at).num_hours() > 3 * 24 {
-                    return false;
-                }
-                // if self.if_filter_by_label(&issue) {
-                //     return false;
-                // }
-                issue.pull_request.is_none() && issue.assignee.is_none() // && !if_member(&issue.author_association)
-            })
-            .collect();
+    //     let opened_issues: Vec<Issue> = opened_all
+    //         .into_iter()
+    //         .filter(|issue| issue.pull_request.is_none())
+    //         .collect();
 
-        let mut no_comment_issue = Vec::<Issue>::new();
-        for issue in opened_issues {
-            let comment_num = self.get_comments_by_issue(&issue).await?;
-            if comment_num == 0 {
-                no_comment_issue.push(issue);
-            }
-        }
+    //     Ok(opened_issues)
+    // }
 
-        Ok(no_comment_issue)
-    }
-
-    async fn get_opened_issues_by_repo(&self, repo: &Repo) -> Result<Vec<Issue>> {
+    async fn get_opened_issues_by_repo<'a> (&self, repo: &'a Repo) -> Result<RepoIssues<'a>> {
         let mut all = Vec::<Issue>::new();
         let mut page = 0;
 
@@ -242,30 +282,155 @@ impl GitHub {
             let batch: Vec<Issue> = serde_json::from_str(&res[..])?;
             all.extend(batch);
         }
-        println!("all ok");
 
-        Ok(all
+        let opened_all = all
             .into_iter()
             .map(|mut issue| {
                 issue.owner = repo.owner.to_owned();
                 issue.repo = repo.repo.to_owned();
                 issue
             })
-            .collect())
+            .collect();
+
+        Ok(RepoIssues{
+            repo: repo,
+            issues: opened_all,
+        })
     }
 
-    async fn get_comments_by_issue(&self, issue: &Issue) -> Result<usize> {
-        let url = format!(
-            "{}/repos/{}/{}/issues/{}/comments?per_page={}",
-            API_BASE_URL, issue.owner, issue.repo, issue.number, PER_PAGE
-        );
-        let res = self.request(&url[..], vec![]).await?;
-        let comments: Vec<Comment> = serde_json::from_str(&res[..])?;
-        let member_comments: Vec<Comment> = comments
-            .into_iter()
-            .filter(|comment| if_member(&comment.author_association))
-            .collect();
-        Ok(member_comments.len())
+    // async fn get_comments_by_issue(&self, issue: &Issue) -> Result<usize> {
+    //     let url = format!(
+    //         "{}/repos/{}/{}/issues/{}/comments?per_page={}",
+    //         API_BASE_URL, issue.owner, issue.repo, issue.number, PER_PAGE
+    //     );
+    //     let res = self.request(&url[..], vec![]).await?;
+    //     let comments: Vec<Comment> = serde_json::from_str(&res[..])?;
+    //     let member_comments: Vec<Comment> = comments
+    //         .into_iter()
+    //         .filter(|comment| if_member(&comment.author_association))
+    //         .collect();
+    //     Ok(member_comments.len())
+    // }
+
+    async fn get_opened_issues<'a> (&'a self) -> Result<Vec<RepoIssues<'a>>> {
+        let mut repos: Vec<RepoIssues> = Vec::new();
+        for repo in &self.repos {
+            let repo_issues = self.get_opened_issues_by_repo(repo).await?;
+            repos.push(repo_issues);
+        }
+        Ok(repos)
+    }
+
+    pub async fn get_projects_id(&mut self) -> Result<()> {
+        let mut number2id = HashMap::new();
+        for project in &self.projects {
+            if let None = project.id {
+                let mut page = 0;
+
+                'outer: loop {
+                    page += 1;
+                    let url = format!("{}/repos/{}/{}/projects?page={}&per_page={}", API_BASE_URL, project.owner, project.repo, page, PER_PAGE);
+                    let res = self.request(&url[..], vec![
+                        Header{
+                            key: "Accept".to_owned(),
+                            value: "application/vnd.github.inertia-preview+json".to_owned(),
+                        }
+                    ]).await?;
+                    let ps: Vec<GitHubProject> = serde_json::from_str(&res[..])?;
+                    for p in &ps {
+                        if p.number == project.number {
+                            number2id.insert(p.number, p.id);
+                            break 'outer;
+                        }
+                    }
+                    if ps.len() < PER_PAGE {
+                        return Err("project not found".into())
+                    }
+                }
+            }
+        }
+        for project in &mut self.projects {
+            if let None = project.id {
+                match number2id.get(&project.number) {
+                    Some(&id) => project.id = Some(id),
+                    None => return Err("project not found".into())
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn get_projects(&self) -> Vec<Project> {
+        self.projects.clone()
+    }
+
+    async fn get_cards_by_column(&self, column: &Column) -> Result<Card> {
+        Err("implement me".into())
+    }
+
+    async fn get_cards(&self, column_id: i64) -> Result<Vec<Card>> {
+        let mut all = vec![];
+        let mut page = 0;
+        while all.len() == page * PER_PAGE {
+            page += 1;
+            let url = format!("{}/projects/columns/{}/cards?page={}&per_page={}", API_BASE_URL, column_id, page, PER_PAGE);
+            let res = self.request(&url[..], vec![
+                Header{
+                    key: "Accept".to_owned(),
+                    value: "application/vnd.github.inertia-preview+json".to_owned(),
+                }
+            ]).await?;
+            let batch: Vec<Card> = serde_json::from_str(&res[..])?;
+            all.extend(batch);
+        }
+        Ok(all)
+    }
+
+    async fn get_columns(&self, project: &Project) -> Result<Vec<Column>> {
+        if let Some(project_id) = project.id {
+            let url = format!("{}/projects/{}/columns?per_page={}", API_BASE_URL, project_id, PER_PAGE);
+            let res = self.request(&url[..], vec![
+                Header{
+                    key: "Accept".to_owned(),
+                    value: "application/vnd.github.inertia-preview+json".to_owned(),
+                }
+            ]).await?;
+            let mut columns: Vec<Column> = serde_json::from_str(&res[..])?;
+            for column in columns.iter_mut() {
+                (*column).cards = self.get_cards(column.id).await?;
+            }
+            Ok(columns)
+        } else {
+            Err("project id is none".into())
+        }
+    }
+
+    async fn get_project<'a> (&'a self, project: &'a Project) -> Result<ProjectIssues<'a>> {
+        let columns = self.get_columns(project).await?;
+
+        Ok(ProjectIssues{
+            project: project,
+            columns: columns,
+        })
+    }
+
+    async fn get_projects_snapshot<'a> (&'a self) -> Result<Vec<ProjectIssues<'a>>> {
+        let mut projects: Vec<ProjectIssues> = Vec::new();
+        for project in &self.projects {
+            let project_issues = self.get_project(project).await?;
+            projects.push(project_issues);
+        }
+        Ok(projects)
+    }
+
+    pub async fn get_snapshot<'a> (&'a self) -> Result<Snapshot<'a>> {
+        let repo_issues = self.get_opened_issues().await?;
+        let projects = self.get_projects_snapshot().await?;
+        Ok(Snapshot{
+            time: &self.time,
+            repo_issues: repo_issues,
+            project_issues: projects,
+        })
     }
 
     // fn if_filter_by_label(&self, issue: &Issue) -> bool {
@@ -277,10 +442,6 @@ impl GitHub {
     //     }
     //     false
     // }
-}
-
-fn parse_repos(raw: Vec<String>) -> Vec<Repo> {
-    raw.into_iter().map(Into::into).collect()
 }
 
 fn if_member(relation: &String) -> bool {
@@ -295,7 +456,10 @@ mod tests {
     use super::*;
 
     fn new_client() -> GitHub {
-        let repos = vec!["pingcap/parser".to_owned(), "you06/issues-watcher".to_owned()];
+        let repos = vec![
+            "pingcap/parser".to_owned(),
+            "you06/issues-watcher".to_owned(),
+        ];
         let projects = vec![
             "https://github.com/pingcap/parser/projects/1".to_owned(),
             "https://github.com/pingcap/tidb/projects/40".to_owned(),
@@ -324,16 +488,31 @@ mod tests {
                 .collect(),
         }
     }
-    
+
     #[test]
     fn create_client() {
         let client = new_client();
-        assert_eq!(client.repos, vec![
-            Repo{owner: "pingcap".to_owned(), repo: "parser".to_owned()},
-            Repo{owner: "you06".to_owned(), repo: "issues-watcher".to_owned()},
-        ]);
-        assert_eq!(client.projects, vec![
-            Project{owner: "pingcap".to_owned(), repo: "tidb".to_owned(), number: 40},
-        ]);
+        assert_eq!(
+            client.repos,
+            vec![
+                Repo {
+                    owner: "pingcap".to_owned(),
+                    repo: "parser".to_owned()
+                },
+                Repo {
+                    owner: "you06".to_owned(),
+                    repo: "issues-watcher".to_owned()
+                },
+            ]
+        );
+        assert_eq!(
+            client.projects,
+            vec![Project {
+                owner: "pingcap".to_owned(),
+                repo: "tidb".to_owned(),
+                number: 40,
+                id: None,
+            },]
+        );
     }
 }
